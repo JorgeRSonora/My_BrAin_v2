@@ -1,0 +1,245 @@
+@import "tailwindcss";
+
+/* ========== Tema estilo Apple (neutros + botones negros) ========== */
+:root {
+  --apple-black: #1d1d1f;
+  --apple-black-hover: #333336;
+  --apple-blue: #0071e3;
+  --apple-blue-hover: #0077ed;
+  /* Primario = negro UI (botones, focos fuertes) */
+  --color-primary: #1d1d1f;
+  --color-primary-light: #424245;
+  --color-primary-dark: #000000;
+  --color-accent: var(--apple-blue);
+  --color-accent-light: var(--apple-blue-hover);
+  --color-danger: #e11d48;
+  --color-warning: #d97706;
+  --color-success: #059669;
+  --color-bg-dark: #f5f5f7;
+  /* Campos y superficies sobre vidrio */
+  --color-bg-card: rgba(255, 255, 255, 0.9);
+  --color-bg-card-hover: rgba(255, 255, 255, 0.97);
+  --color-text: #1d1d1f;
+  --color-text-muted: #86868b;
+  --color-border: rgba(0, 0, 0, 0.08);
+  --color-border-strong: #d2d2d7;
+  --font-main: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  --radius-pill: 980px;
+  --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --shadow-button-hover: 0 4px 16px rgba(0, 0, 0, 0.12);
+  /* Sidebar como tarjeta glass alineada con el contenido */
+  --sidebar-width: 260px;
+  --sidebar-inset: 14px;
+  --sidebar-gap: 12px;
+  --layout-sidebar-offset: calc(var(--sidebar-inset) + var(--sidebar-width) + var(--sidebar-gap));
+}
+
+/* ========== RESET BASE ========== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-main);
+  background: radial-gradient(ellipse 100% 70% at 50% -15%, rgba(0, 0, 0, 0.04), transparent 50%),
+    linear-gradient(180deg, #fafafa 0%, var(--color-bg-dark) 55%);
+  color: var(--color-text);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ========== SCROLLBAR ========== */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 100px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+/* ========== SUPERFICIES (glassmorphism + más lectura) ========== */
+.glass {
+  background: rgba(255, 255, 255, 0.46);
+  backdrop-filter: saturate(165%) blur(20px);
+  -webkit-backdrop-filter: saturate(165%) blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.glass-strong {
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: saturate(165%) blur(22px);
+  -webkit-backdrop-filter: saturate(165%) blur(22px);
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.62);
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, #1d1d1f 0%, #636366 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ========== BOTONES ========== */
+.btn-primary {
+  background: var(--apple-black);
+  color: #fff;
+  border: none;
+  padding: 11px 24px;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  font-family: var(--font-main);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--apple-black-hover);
+  box-shadow: var(--shadow-button-hover);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.btn-primary:focus-visible {
+  outline: 2px solid var(--apple-blue);
+  outline-offset: 3px;
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-secondary {
+  background: var(--color-bg-card);
+  color: var(--color-primary);
+  border: 1px solid var(--color-border-strong);
+  padding: 11px 22px;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
+  font-family: var(--font-main);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-bg-dark);
+  border-color: rgba(0, 0, 0, 0.22);
+}
+
+.btn-secondary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.btn-secondary:focus-visible {
+  outline: 2px solid var(--apple-blue);
+  outline-offset: 3px;
+}
+
+.btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ========== ANIMACIONES ========== */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 0, 0, 0.06);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.12);
+  }
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.45s ease forwards;
+}
+
+.animate-slide-left {
+  animation: slideInLeft 0.35s ease forwards;
+}
+
+/* Layout páginas con sidebar */
+.dashboard-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.dashboard-main {
+  flex: 1;
+  padding: 32px;
+  margin-left: var(--layout-sidebar-offset);
+  max-width: 1200px;
+}
+
+@media (max-width: 1024px) {
+  .dashboard-main {
+    margin-left: 0;
+    padding: 20px;
+    padding-top: 80px;
+  }
+}
+
+.dash-greeting {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+@media (max-width: 640px) {
+  .dash-greeting {
+    font-size: 1.35rem;
+  }
+}
