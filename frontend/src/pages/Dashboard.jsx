@@ -225,7 +225,7 @@ export default function Dashboard() {
   const siguientesEventos = eventosProximos.slice(1, 4)
 
   return (
-    <div className="dashboard-layout dash-page-bg">
+    <div className="dashboard-layout">
       <Sidebar />
 
       <main className="dashboard-main">
@@ -434,35 +434,7 @@ export default function Dashboard() {
       </main>
 
       <style>{`
-        /* Fondo solo en zona principal (no detrás del sidebar) */
-        .dash-page-bg {
-          position: relative;
-        }
-        .dash-page-bg::before {
-          content: '';
-          position: fixed;
-          z-index: 0;
-          top: 0;
-          right: 0;
-          bottom: 0;
-          left: 0;
-          pointer-events: none;
-          background-color: #f5f5f7;
-          background-image: linear-gradient(
-              rgba(255, 255, 255, 0.2),
-              rgba(245, 245, 247, 0.32)
-            ),
-            url('/dashboard-bg.jpg');
-          background-size: 100% auto, 100% auto;
-          background-position: center center;
-          background-repeat: no-repeat;
-        }
-        @media (max-width: 1024px) {
-          .dash-page-bg::before {
-            left: 0;
-          }
-        }
-        .dash-page-bg > .dashboard-main {
+        .dashboard-layout > .dashboard-main {
           position: relative;
           z-index: 1;
         }

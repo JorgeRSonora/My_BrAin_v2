@@ -2,22 +2,35 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import Sidebar from '../components/Sidebar'
+import { readJsonResponse } from '../utils/readJsonResponse'
+import { CATEGORIAS_GASTO, CATEGORIAS_INGRESO } from '../constants/categoriasGasto.js'
+import { AppSelectCollapsible } from '@/components/ui/app-select-collapsible'
+
+const TIPOS_MOVIMIENTO = [
+  { value: 'gasto', label: 'Gasto' },
+  { value: 'ingreso', label: 'Ingreso' },
+]
 
 const fmt = (n) =>
   new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(n)
 
+function fmtFechaMovimiento(fechaStr) {
+  if (!fechaStr) return '—'
+  const day = String(fechaStr).slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return String(fechaStr)
+  const [y, m, d] = day.split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  return dt.toLocaleDateString('es-ES', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  })
+}
+
 function monthNow() {
   const d = new Date()
   return { year: d.getFullYear(), month: d.getMonth() + 1 }
-}
-
-function lunesSemanaActualIso() {
-  const now = new Date()
-  const day = now.getDay()
-  const diff = day === 0 ? -6 : 1 - day
-  const mon = new Date(now)
-  mon.setDate(now.getDate() + diff)
-  return mon.toISOString().slice(0, 10)
 }
 
 export default function Finanzas() {
@@ -35,37 +48,32 @@ export default function Finanzas() {
   const [movimientos, setMovimientos] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [huchas, setHuchas] = useState([])
   const [form, setForm] = useState({
     tipo: 'gasto',
     monto: '',
     categoria: '',
     descripcion: '',
     fecha: new Date().toISOString().slice(0, 10),
-    hucha_id: '',
   })
   const [saving, setSaving] = useState(false)
-  const [aiGroq, setAiGroq] = useState(false)
-  const [informeMd, setInformeMd] = useState('')
-  const [informeLoading, setInformeLoading] = useState(false)
-  const [semanaInforme, setSemanaInforme] = useState(() => lunesSemanaActualIso())
+  const [catModalOpen, setCatModalOpen] = useState(false)
+  const [catLoading, setCatLoading] = useState(false)
+  const [catError, setCatError] = useState('')
+  const [catData, setCatData] = useState(null)
+
   const load = useCallback(async () => {
     if (!userId) return
     setLoading(true)
     setError('')
     try {
       const qs = new URLSearchParams({ userId: String(userId), year: String(year), month: String(month) })
-      const [r1, r2, r3] = await Promise.all([
+      const [r1, r2] = await Promise.all([
         fetch(`/api/finanzas/resumen?${qs}`),
         fetch(`/api/finanzas/movimientos?${qs}`),
-        fetch(`/api/finanzas/huchas?userId=${userId}`),
       ])
-      const j1 = await r1.json()
-      const j2 = await r2.json()
-      const j3 = await r3.json()
+      const [j1, j2] = await Promise.all([readJsonResponse(r1), readJsonResponse(r2)])
       if (!r1.ok) throw new Error(j1.error || 'Error resumen')
       if (!r2.ok) throw new Error(j2.error || 'Error movimientos')
-      if (!r3.ok) throw new Error(j3.error || 'Error huchas')
       setResumen({
         ingresos: Number(j1.ingresos ?? 0),
         gastos: Number(j1.gastos ?? 0),
@@ -73,7 +81,6 @@ export default function Finanzas() {
         balance: Number(j1.balance ?? 0),
       })
       setMovimientos(j2.movimientos || [])
-      setHuchas(j3.huchas || [])
     } catch (e) {
       setError(e.message || 'Error de red')
     } finally {
@@ -87,37 +94,48 @@ export default function Finanzas() {
 
   useEffect(() => {
     const tipo = location.state?.prefillTipo
-    if (tipo === 'ingreso' || tipo === 'gasto' || tipo === 'aportacion_hucha') {
+    if (tipo === 'ingreso' || tipo === 'gasto') {
       setForm((f) => ({ ...f, tipo }))
     }
   }, [location.state])
 
-  useEffect(() => {
-    fetch('/api/ai/status')
-      .then((r) => r.json())
-      .then((d) => setAiGroq(!!d.groq))
-      .catch(() => setAiGroq(false))
+  const abrirGastosPorCategoria = useCallback(async () => {
+    if (!userId) return
+    setCatModalOpen(true)
+    setCatLoading(true)
+    setCatError('')
+    setCatData(null)
+    try {
+      const qs = new URLSearchParams({
+        userId: String(userId),
+        year: String(year),
+        month: String(month),
+      })
+      const res = await fetch(`/api/finanzas/gastos-por-categoria?${qs}`)
+      const data = await readJsonResponse(res)
+      if (!res.ok) throw new Error(data.error || 'Error al cargar el desglose')
+      setCatData(data)
+    } catch (e) {
+      setCatError(e.message || 'Error de red')
+    } finally {
+      setCatLoading(false)
+    }
+  }, [userId, year, month])
+
+  const cerrarCatModal = useCallback(() => {
+    setCatModalOpen(false)
+    setCatData(null)
+    setCatError('')
   }, [])
 
-  const generarInforme = async () => {
-    if (!userId) return
-    setInformeLoading(true)
-    setError('')
-    try {
-      const res = await fetch('/api/ai/informe-finanzas', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, semanaInicio: semanaInforme }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Error al generar informe')
-      setInformeMd(data.informeMarkdown || '')
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setInformeLoading(false)
+  useEffect(() => {
+    if (!catModalOpen) return
+    const onKey = (e) => {
+      if (e.key === 'Escape') cerrarCatModal()
     }
-  }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [catModalOpen, cerrarCatModal])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -127,8 +145,12 @@ export default function Finanzas() {
       setError('Introduce un importe válido')
       return
     }
-    if (form.tipo === 'aportacion_hucha' && !form.hucha_id) {
-      setError('Elige una hucha para la aportación')
+    if (form.tipo === 'gasto' && !form.categoria) {
+      setError('Elige una categoría para el gasto')
+      return
+    }
+    if (form.tipo === 'ingreso' && !form.categoria) {
+      setError('Elige una categoría para el ingreso')
       return
     }
     setSaving(true)
@@ -142,22 +164,18 @@ export default function Finanzas() {
         descripcion: form.descripcion || null,
         fecha: form.fecha,
       }
-      if (form.tipo === 'aportacion_hucha') {
-        payload.hucha_id = parseInt(String(form.hucha_id), 10)
-      }
       const res = await fetch('/api/finanzas/movimientos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      const data = await res.json()
+      const data = await readJsonResponse(res)
       if (!res.ok) throw new Error(data.error || 'No se pudo guardar')
       setForm((f) => ({
         ...f,
         monto: '',
         categoria: '',
         descripcion: '',
-        hucha_id: '',
       }))
       await load()
     } catch (err) {
@@ -171,7 +189,7 @@ export default function Finanzas() {
     if (!userId || !confirm('¿Eliminar este movimiento?')) return
     try {
       const res = await fetch(`/api/finanzas/movimientos/${id}?userId=${userId}`, { method: 'DELETE' })
-      const data = await res.json()
+      const data = await readJsonResponse(res)
       if (!res.ok) throw new Error(data.error || 'Error')
       await load()
     } catch (e) {
@@ -184,7 +202,7 @@ export default function Finanzas() {
   const pctGas = (resumen.gastos / maxBar) * 100
 
   return (
-    <div className="dashboard-layout fin-page-bg">
+    <div className="dashboard-layout">
       <Sidebar />
       <main className="dashboard-main">
         <header className="page-head animate-fade-in">
@@ -277,28 +295,19 @@ export default function Finanzas() {
         <section className="fin-form-section glass animate-fade-in">
           <h2 className="section-title">Registrar movimiento</h2>
           <form className="fin-form" onSubmit={handleSubmit}>
-            <select
+            <AppSelectCollapsible
+              id="fin-tipo"
               value={form.tipo}
-              onChange={(e) => setForm({ ...form, tipo: e.target.value, hucha_id: '' })}
-            >
-              <option value="ingreso">Ingreso</option>
-              <option value="gasto">Gasto</option>
-              <option value="aportacion_hucha">Aportación a hucha</option>
-            </select>
-            {form.tipo === 'aportacion_hucha' && (
-              <select
-                value={form.hucha_id}
-                onChange={(e) => setForm({ ...form, hucha_id: e.target.value })}
-                required
-              >
-                <option value="">— Hucha —</option>
-                {huchas.map((h) => (
-                  <option key={h.id} value={String(h.id)}>
-                    {h.nombre} ({fmt(h.saldo)})
-                  </option>
-                ))}
-              </select>
-            )}
+              onChange={(tipo) =>
+                setForm({
+                  ...form,
+                  tipo,
+                  categoria: '',
+                })
+              }
+              options={TIPOS_MOVIMIENTO}
+              ariaLabel="Tipo de movimiento: gasto o ingreso"
+            />
             <input
               type="text"
               inputMode="decimal"
@@ -307,11 +316,16 @@ export default function Finanzas() {
               onChange={(e) => setForm({ ...form, monto: e.target.value })}
               required
             />
-            <input
-              type="text"
-              placeholder="Categoría"
+            <AppSelectCollapsible
+              key={form.tipo}
+              id="fin-categoria"
               value={form.categoria}
-              onChange={(e) => setForm({ ...form, categoria: e.target.value })}
+              onChange={(categoria) => setForm({ ...form, categoria })}
+              options={form.tipo === 'gasto' ? CATEGORIAS_GASTO : CATEGORIAS_INGRESO}
+              placeholder="— Categoría —"
+              ariaLabel={
+                form.tipo === 'gasto' ? 'Categoría del gasto' : 'Categoría del ingreso'
+              }
             />
             <input
               type="date"
@@ -330,7 +344,8 @@ export default function Finanzas() {
             </button>
           </form>
           <p className="muted fin-hucha-hint">
-            Para crear huchas con meta de ahorro ve a <Link to="/eventos">Eventos</Link>.
+            Las huchas y el dinero que aportas a ellas se gestionan en <Link to="/eventos">Eventos</Link>; aquí verás
+            esos movimientos como «Ahorro (hucha)».
           </p>
         </section>
 
@@ -355,7 +370,7 @@ export default function Finanzas() {
               <tbody>
                 {movimientos.map((m) => (
                   <tr key={m.id}>
-                    <td>{m.fecha}</td>
+                    <td title={String(m.fecha || '').slice(0, 10)}>{fmtFechaMovimiento(m.fecha)}</td>
                     <td>
                       {m.tipo === 'ingreso'
                         ? 'Ingreso'
@@ -384,79 +399,111 @@ export default function Finanzas() {
           )}
         </section>
 
-        <section className="fin-ia glass animate-fade-in">
-          <h2 className="section-title">Informe semanal con IA (Groq)</h2>
-          <p className="muted fin-ia-intro">
-            Usa los movimientos guardados para la semana natural (lunes–domingo). Configura{' '}
-            <code>GROQ_API_KEY</code> en el servidor:{' '}
-            <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">
-              Groq Console
-            </a>
-            .
-          </p>
-          {!aiGroq && (
-            <p className="fin-warn">
-              IA no configurada: crea <code>GROQ_API_KEY</code> en <code>backend/server/.env</code>.
-            </p>
-          )}
-          <div className="fin-ia-row">
-            <label className="fin-ia-label">
-              Lunes de la semana a analizar{' '}
-              <input
-                type="date"
-                value={semanaInforme}
-                onChange={(e) => setSemanaInforme(e.target.value)}
-              />
-            </label>
+        <section className="fin-cat-section glass animate-fade-in">
+          <div className="fin-cat-head">
+            <div>
+              <h2 className="section-title">Gastos por categoría</h2>
+              <p className="muted fin-cat-desc">
+                Desglose del mes seleccionado: incluye gastos <strong>manuales</strong> y los registrados desde{' '}
+                <strong>tickets</strong> (escáner o texto con IA).
+              </p>
+            </div>
             <button
               type="button"
-              className="btn-primary"
-              disabled={!userId || informeLoading || !aiGroq}
-              onClick={generarInforme}
+              className="btn-primary fin-cat-open-btn"
+              disabled={!userId}
+              onClick={abrirGastosPorCategoria}
             >
-              {informeLoading ? 'Generando informe…' : 'Generar informe semanal'}
+              Ver gastos detallados por categorías
             </button>
           </div>
-          {informeMd && (
-            <div className="fin-informe-md" role="article">
-              {informeMd}
-            </div>
-          )}
         </section>
 
-        <style>{`
-          .fin-page-bg {
-            position: relative;
-          }
-          .fin-page-bg::before {
-            content: '';
-            position: fixed;
-            z-index: 0;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            left: 0;
-            pointer-events: none;
-            background-color: #f5f2ee;
-            background-image: linear-gradient(
-                rgba(255, 253, 248, 0.2),
-                rgba(245, 240, 232, 0.3)
-              ),
-              url('/finanzas-bg.png');
-            background-size: 100% auto, 100% auto;
-            background-position: center center;
-            background-repeat: no-repeat;
-          }
-          @media (max-width: 1024px) {
-            .fin-page-bg::before {
-              left: 0;
-            }
-          }
-          .fin-page-bg > .dashboard-main {
-            position: relative;
-            z-index: 1;
-          }
+        {catModalOpen && (
+          <div className="fin-cat-overlay" role="presentation" onClick={cerrarCatModal}>
+            <div
+              className="fin-cat-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="fin-cat-modal-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="fin-cat-modal-toolbar">
+                <div className="fin-cat-modal-headtext">
+                  <h2 id="fin-cat-modal-title" className="fin-cat-modal-title">
+                    Gastos por categoría
+                  </h2>
+                  <p className="fin-cat-modal-sub">
+                    {new Date(year, month - 1, 1).toLocaleString('es-ES', { month: 'long', year: 'numeric' })}
+                  </p>
+                </div>
+                <div className="fin-cat-modal-actions">
+                  {catData && typeof catData.totalMes === 'number' && (
+                    <span className="fin-cat-total-pill">
+                      <span className="fin-cat-total-pill-label">Total mes</span>
+                      <span className="fin-cat-total-pill-value">{fmt(catData.totalMes)}</span>
+                    </span>
+                  )}
+                  <button type="button" className="fin-cat-close" onClick={cerrarCatModal} aria-label="Cerrar">
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </div>
+              </div>
+              <div className="fin-cat-modal-body">
+                {catLoading && <p className="muted">Cargando…</p>}
+                {catError && (
+                  <p className="fin-error" role="alert">
+                    {catError}
+                  </p>
+                )}
+                {!catLoading && catData && catData.grupos?.length === 0 && (
+                  <p className="muted">No hay gastos registrados en este mes.</p>
+                )}
+                {!catLoading &&
+                  catData?.grupos?.map((g, gi) => (
+                    <div key={g.categoria} className={`fin-cat-grupo fin-tone-${gi % 7}`}>
+                      <div className="fin-cat-grupo-head">
+                        <h3 className="fin-cat-grupo-title">{g.categoria}</h3>
+                        <span className="fin-cat-grupo-total">{fmt(g.total)}</span>
+                      </div>
+                      <div className="fin-cat-table-scroll">
+                        <table className="fin-cat-table">
+                        <thead>
+                          <tr>
+                            <th>Fecha</th>
+                            <th>Importe</th>
+                            <th>Descripción</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {g.lineas.map((ln) => (
+                            <tr key={ln.id}>
+                              <td title={String(ln.fecha || '').slice(0, 10)}>{fmtFechaMovimiento(ln.fecha)}</td>
+                              <td className="text-neg">{fmt(ln.monto)}</td>
+                              <td>{ln.descripcion || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </div>
+        )}
 
+        <style>{`
+          .dashboard-main section.glass {
+            background: rgba(255, 252, 248, 0.82);
+            backdrop-filter: saturate(140%) blur(18px);
+            -webkit-backdrop-filter: saturate(140%) blur(18px);
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            box-shadow:
+              0 4px 6px rgba(45, 38, 32, 0.04),
+              0 16px 48px rgba(45, 38, 32, 0.1),
+              inset 0 1px 0 rgba(255, 255, 255, 0.85);
+          }
           .page-head { margin-bottom: 24px; }
           .dash-sub { color: var(--color-text-muted); font-size: 0.95rem; margin-top: 6px; }
           .fin-toolbar {
@@ -492,8 +539,8 @@ export default function Finanzas() {
             margin-bottom: 24px;
           }
           .stat-card {
-            padding: 20px;
-            border-radius: 16px;
+            padding: 22px;
+            border-radius: 18px;
             display: flex;
             gap: 14px;
             align-items: flex-start;
@@ -511,7 +558,7 @@ export default function Finanzas() {
           }
           .text-pos { color: var(--color-success); }
           .text-neg { color: var(--color-danger); }
-          .fin-chart { padding: 24px; border-radius: 16px; margin-bottom: 24px; }
+          .fin-chart { padding: 26px; border-radius: 20px; margin-bottom: 24px; }
           .fin-bars { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
           .fin-bar-track {
             height: 12px;
@@ -527,7 +574,17 @@ export default function Finanzas() {
           .fin-bar.gas {
             background: linear-gradient(90deg, var(--color-danger), var(--color-warning));
           }
-          .fin-form-section { padding: 24px; border-radius: 16px; margin-bottom: 24px; }
+          .fin-form-section {
+            padding: 26px;
+            border-radius: 20px;
+            margin-bottom: 24px;
+            overflow: visible;
+            position: relative;
+            z-index: 2;
+          }
+          .fin-form-section:has([data-state='open']) {
+            z-index: 50;
+          }
           .fin-hucha-hint {
             margin-top: 14px;
             font-size: 0.88rem;
@@ -542,21 +599,69 @@ export default function Finanzas() {
           }
           .fin-form {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr));
             gap: 12px;
             align-items: end;
             margin-top: 12px;
+            overflow: visible;
           }
-          .fin-form select,
           .fin-form input {
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 42px;
             padding: 10px 14px;
             border-radius: 12px;
             border: 1px solid var(--color-border);
             background: var(--color-bg-card);
             color: var(--color-text);
             font-family: var(--font-main);
+            font-size: 0.9375rem;
           }
-          .fin-table-wrap { padding: 24px; border-radius: 16px; overflow-x: auto; }
+          .fin-select-collapsible {
+            width: 100%;
+            min-width: 0;
+          }
+          .fin-select-trigger {
+            font-family: var(--font-main);
+            font-size: 0.9375rem;
+            cursor: pointer;
+            padding: 10px 14px;
+            border-radius: 12px;
+          }
+          .fin-select-trigger span {
+            white-space: normal;
+            word-break: break-word;
+          }
+          .fin-select-menu,
+          .fin-select-menu--portal {
+            margin: 0;
+            padding: 6px;
+            list-style: none;
+            border-radius: 12px;
+            border: 1px solid var(--color-border);
+            background: rgba(255, 255, 255, 0.98);
+            box-shadow: 0 16px 40px rgba(74, 69, 62, 0.16);
+            max-height: min(320px, 60vh);
+            overflow-y: auto;
+            box-sizing: border-box;
+          }
+          .fin-select-option {
+            border: none;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--color-text);
+            font-family: var(--font-main);
+            cursor: pointer;
+          }
+          .fin-select-option:hover {
+            background: rgba(74, 69, 62, 0.06);
+          }
+          .fin-select-option--active {
+            background: rgba(74, 69, 62, 0.08);
+            font-weight: 600;
+            color: var(--color-accent-light);
+          }
+          .fin-table-wrap { padding: 26px; border-radius: 20px; overflow-x: auto; }
           .fin-table {
             width: 100%;
             border-collapse: collapse;
@@ -580,64 +685,277 @@ export default function Finanzas() {
           }
           .btn-del:hover { border-color: var(--color-danger); background: rgba(255,107,107,0.1); }
           .muted { color: var(--color-text-muted); }
-          .section-title {
-            font-size: 1.05rem;
-            font-weight: 600;
-            margin-bottom: 4px;
+          .dashboard-main .section-title {
+            font-size: 1.12rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 6px;
+            color: #1c1917;
           }
-          .fin-ia {
-            padding: 24px;
-            border-radius: 16px;
+          .fin-cat-section {
+            padding: 24px 26px;
+            border-radius: 20px;
             margin-bottom: 32px;
           }
-          .fin-ia-intro {
-            font-size: 0.88rem;
-            line-height: 1.5;
-            margin: 10px 0 14px;
-          }
-          .fin-ia-intro a {
-            color: var(--color-accent-light);
-          }
-          .fin-warn {
-            font-size: 0.85rem;
-            color: var(--color-warning);
-            margin-bottom: 14px;
-            padding: 10px 12px;
-            border-radius: 10px;
-            background: rgba(253, 203, 110, 0.08);
-          }
-          .fin-warn code {
-            font-size: 0.78rem;
-            background: rgba(15, 23, 42, 0.06);
-            padding: 2px 6px;
-            border-radius: 6px;
-          }
-          .fin-ia-row {
+          .fin-cat-head {
             display: flex;
             flex-wrap: wrap;
-            gap: 16px;
-            align-items: flex-end;
-            margin-bottom: 12px;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 18px 28px;
           }
-          .fin-ia-label input[type='date'] {
-            margin-left: 8px;
-            padding: 8px 12px;
-            border-radius: 10px;
-            border: 1px solid var(--color-border);
-            background: var(--color-bg-card);
-            color: var(--color-text);
-            font-family: var(--font-main);
+          .fin-cat-desc {
+            margin: 10px 0 0;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            max-width: 44rem;
+            color: rgba(45, 42, 38, 0.72);
           }
-          .fin-informe-md {
-            margin-top: 18px;
-            padding: 18px 20px;
+          .fin-cat-open-btn {
+            flex-shrink: 0;
+            align-self: center;
+            padding: 12px 22px;
             border-radius: 14px;
-            border: 1px solid var(--color-border);
-            background: #F1F5F9;
-            white-space: pre-wrap;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            box-shadow: 0 4px 14px rgba(45, 90, 72, 0.22);
+          }
+          .fin-cat-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 280;
+            background: rgba(28, 25, 22, 0.52);
+            backdrop-filter: blur(8px) saturate(120%);
+            -webkit-backdrop-filter: blur(8px) saturate(120%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+            overflow-y: auto;
+            animation: finCatOverlayIn 0.22s ease-out;
+          }
+          @keyframes finCatOverlayIn {
+            from {
+              opacity: 0;
+            }
+            to {
+              opacity: 1;
+            }
+          }
+          @keyframes finCatModalIn {
+            from {
+              opacity: 0;
+              transform: translateY(12px) scale(0.98);
+            }
+            to {
+              opacity: 1;
+              transform: translateY(0) scale(1);
+            }
+          }
+          .fin-cat-modal {
+            width: 100%;
+            max-width: 760px;
+            max-height: min(92vh, 900px);
+            display: flex;
+            flex-direction: column;
+            border-radius: 22px;
+            overflow: hidden;
+            margin: auto;
+            background: linear-gradient(165deg, #fffdfb 0%, #faf6ef 48%, #f3ebe0 100%);
+            border: 1px solid rgba(255, 255, 255, 0.95);
+            box-shadow:
+              0 0 0 1px rgba(45, 38, 32, 0.06),
+              0 24px 64px rgba(28, 22, 18, 0.22),
+              0 8px 24px rgba(28, 22, 18, 0.12),
+              inset 0 1px 0 rgba(255, 255, 255, 0.9);
+            animation: finCatModalIn 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+          }
+          .fin-cat-modal-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+            padding: 22px 24px 18px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.65) 0%, transparent 100%);
+            border-bottom: 1px solid rgba(45, 38, 32, 0.08);
+            flex-shrink: 0;
+            position: relative;
+          }
+          .fin-cat-modal-toolbar::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            border-radius: 22px 0 0 0;
+            background: linear-gradient(180deg, #5a8f6e, #3d6b8f);
+          }
+          .fin-cat-modal-headtext {
+            padding-left: 12px;
+          }
+          .fin-cat-modal-title {
+            margin: 0;
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            color: #1c1917;
+          }
+          .fin-cat-modal-sub {
+            margin: 8px 0 0;
             font-size: 0.92rem;
-            line-height: 1.65;
-            color: var(--color-text);
+            color: rgba(45, 42, 38, 0.62);
+            text-transform: capitalize;
+          }
+          .fin-cat-modal-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-shrink: 0;
+          }
+          .fin-cat-total-pill {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: flex-end;
+            padding: 8px 14px 10px;
+            border-radius: 14px;
+            background: rgba(139, 90, 74, 0.1);
+            border: 1px solid rgba(139, 90, 74, 0.18);
+          }
+          .fin-cat-total-pill-label {
+            font-size: 0.65rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(90, 60, 50, 0.65);
+          }
+          .fin-cat-total-pill-value {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #8b4a3c;
+            font-variant-numeric: tabular-nums;
+          }
+          .fin-cat-close {
+            width: 44px;
+            height: 44px;
+            border: none;
+            border-radius: 12px;
+            background: rgba(45, 38, 32, 0.06);
+            font-size: 1.5rem;
+            line-height: 1;
+            cursor: pointer;
+            color: rgba(45, 38, 38, 0.75);
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
+          }
+          .fin-cat-close:hover {
+            background: rgba(139, 74, 60, 0.12);
+            color: #6b2e24;
+          }
+          .fin-cat-close:active {
+            transform: scale(0.96);
+          }
+          .fin-cat-modal-body {
+            padding: 20px 22px 26px;
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
+          }
+          .fin-cat-grupo {
+            margin-bottom: 18px;
+            padding: 16px 18px 6px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.55);
+            border: 1px solid rgba(45, 38, 32, 0.07);
+            box-shadow: 0 2px 12px rgba(45, 38, 32, 0.04);
+          }
+          .fin-cat-grupo:last-child {
+            margin-bottom: 0;
+          }
+          .fin-cat-grupo.fin-tone-0 {
+            border-left: 4px solid #7d6b5a;
+          }
+          .fin-cat-grupo.fin-tone-1 {
+            border-left: 4px solid #5a8f6e;
+          }
+          .fin-cat-grupo.fin-tone-2 {
+            border-left: 4px solid #3d7a8f;
+          }
+          .fin-cat-grupo.fin-tone-3 {
+            border-left: 4px solid #b86b52;
+          }
+          .fin-cat-grupo.fin-tone-4 {
+            border-left: 4px solid #8b6bb8;
+          }
+          .fin-cat-grupo.fin-tone-5 {
+            border-left: 4px solid #2d8a7a;
+          }
+          .fin-cat-grupo.fin-tone-6 {
+            border-left: 4px solid #7a7368;
+          }
+          .fin-cat-grupo-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 12px;
+            padding-bottom: 0;
+            border-bottom: none;
+          }
+          .fin-cat-grupo-title {
+            margin: 0;
+            font-size: 1.02rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            color: #292524;
+          }
+          .fin-cat-grupo-total {
+            font-weight: 700;
+            font-size: 1.05rem;
+            color: #9a4a3d;
+            font-variant-numeric: tabular-nums;
+            padding: 4px 10px;
+            border-radius: 10px;
+            background: rgba(154, 74, 61, 0.08);
+          }
+          .fin-cat-table-scroll {
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(45, 38, 32, 0.06);
+            background: rgba(255, 255, 255, 0.7);
+          }
+          .fin-cat-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+          }
+          .fin-cat-table th,
+          .fin-cat-table td {
+            text-align: left;
+            padding: 11px 14px;
+            border-bottom: 1px solid rgba(45, 38, 32, 0.06);
+          }
+          .fin-cat-table tbody tr:last-child td {
+            border-bottom: none;
+          }
+          .fin-cat-table tbody tr:hover td {
+            background: rgba(90, 143, 110, 0.06);
+          }
+          .fin-cat-table th {
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            color: rgba(45, 42, 38, 0.5);
+            background: rgba(245, 240, 232, 0.95);
+          }
+          .fin-cat-table td.text-neg {
+            font-weight: 600;
+            color: #a8483c;
+            font-variant-numeric: tabular-nums;
           }
         `}</style>
       </main>

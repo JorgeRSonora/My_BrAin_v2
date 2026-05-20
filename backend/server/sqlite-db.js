@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS lista_compra (
 
 CREATE INDEX IF NOT EXISTS idx_lista_user ON lista_compra(usuario_id);
 
+CREATE TABLE IF NOT EXISTS despensa (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  usuario_id INTEGER NOT NULL,
+  item TEXT NOT NULL,
+  origen TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_despensa_user ON despensa(usuario_id);
+
 CREATE TABLE IF NOT EXISTS eventos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   usuario_id INTEGER NOT NULL,
@@ -100,6 +111,43 @@ async function tableExists(database, name) {
     [name]
   )
   return Boolean(row)
+}
+
+/**
+ * Bases antiguas tenían CHECK (tipo IN ('ingreso','gasto')) y rechazaban aportacion_hucha al insertar.
+ * Recrea la tabla sin ese CHECK (los tipos se validan en la API).
+ */
+async function migrateMovimientosFinancierosTipo(database) {
+  const rows = await database.all(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='movimientos_financieros'`
+  )
+  const sql = String(rows[0]?.sql || '')
+  if (!sql.includes("tipo IN ('ingreso', 'gasto')") || sql.includes('aportacion_hucha')) return
+
+  await database.exec('PRAGMA foreign_keys = OFF')
+  await database.exec(`
+    CREATE TABLE movimientos_financieros__new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      usuario_id INTEGER NOT NULL,
+      tipo TEXT NOT NULL,
+      monto REAL NOT NULL,
+      categoria TEXT,
+      descripcion TEXT,
+      fecha TEXT NOT NULL,
+      hucha_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+      FOREIGN KEY (hucha_id) REFERENCES huchas_ahorro(id) ON DELETE SET NULL
+    );
+    INSERT INTO movimientos_financieros__new (id, usuario_id, tipo, monto, categoria, descripcion, fecha, hucha_id, created_at)
+    SELECT id, usuario_id, tipo, monto, categoria, descripcion, fecha, hucha_id, created_at FROM movimientos_financieros;
+    DROP TABLE movimientos_financieros;
+    ALTER TABLE movimientos_financieros__new RENAME TO movimientos_financieros;
+  `)
+  await database.exec(
+    'CREATE INDEX IF NOT EXISTS idx_mov_user_fecha ON movimientos_financieros(usuario_id, fecha)'
+  )
+  await database.exec('PRAGMA foreign_keys = ON')
 }
 
 /**
@@ -130,6 +178,7 @@ async function migrateLegacy(database) {
         ALTER TABLE movimientos_financieros ADD COLUMN hucha_id INTEGER REFERENCES huchas_ahorro(id) ON DELETE SET NULL
       `)
     }
+    await migrateMovimientosFinancierosTipo(database)
   }
 
   if (await tableExists(database, 'lista_compra')) {
@@ -139,6 +188,20 @@ async function migrateLegacy(database) {
       await database.exec(`ALTER TABLE lista_compra ADD COLUMN cantidad INTEGER NOT NULL DEFAULT 1`)
     }
     await mergeListaCompraDuplicates(database)
+  }
+
+  if (!(await tableExists(database, 'despensa'))) {
+    await database.exec(`
+      CREATE TABLE despensa (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        item TEXT NOT NULL,
+        origen TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_despensa_user ON despensa(usuario_id);
+    `)
   }
 }
 
@@ -240,4 +303,25 @@ export const pool = {
       },
     ]
   },
+}
+
+/**
+ * Transacción SQLite (BEGIN IMMEDIATE … COMMIT / ROLLBACK).
+ * @param {(tx: { run: (sql: string, params?: unknown[]) => Promise<import('sqlite').RunResult> }) => Promise<void>} fn
+ */
+export async function withTransaction(fn) {
+  if (!db) throw new Error('Base de datos no inicializada: llama a initDatabase() antes.')
+  await db.exec('BEGIN IMMEDIATE')
+  try {
+    const out = await fn({
+      run(sql, params = []) {
+        return db.run(sql, params)
+      },
+    })
+    await db.exec('COMMIT')
+    return out
+  } catch (err) {
+    await db.exec('ROLLBACK').catch(() => {})
+    throw err
+  }
 }

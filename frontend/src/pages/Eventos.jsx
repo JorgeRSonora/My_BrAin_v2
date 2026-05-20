@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import Sidebar from '../components/Sidebar'
+import { readJsonResponse } from '../utils/readJsonResponse'
 
 const fmt = (n) =>
   new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(Number(n) || 0)
@@ -162,14 +162,13 @@ export default function Eventos() {
         body: JSON.stringify({
           userId,
           tipo: 'aportacion_hucha',
-          hucha_id: huchaId,
+          hucha_id: parseInt(String(huchaId), 10),
           monto,
           fecha: d.fecha || todayIso(),
           descripcion: d.nota?.trim() || null,
-          categoria: 'Ahorro hucha',
         }),
       })
-      const data = await res.json()
+      const data = await readJsonResponse(res)
       if (!res.ok) throw new Error(data.error || 'No se pudo registrar')
       setAportDraft((prev) => ({
         ...prev,
@@ -184,7 +183,7 @@ export default function Eventos() {
   }
 
   return (
-    <div className="dashboard-layout ev-page-bg">
+    <div className="dashboard-layout">
       <Sidebar />
       <main className="dashboard-main">
         <header className="ev-head animate-fade-in">
@@ -192,12 +191,8 @@ export default function Eventos() {
             Eventos — <span className="gradient-text">próximos y objetivos</span>
           </h1>
           <p className="dash-sub">
-            Planifica fechas importantes y crea huchas con meta de ahorro. Puedes registrar dinero en cada hucha desde
-            aquí o detallar más en{' '}
-            <Link to="/finanzas" className="ev-link">
-              Finanzas
-            </Link>
-            .
+            Planifica fechas importantes y crea huchas con meta de ahorro. El dinero que aportas a cada hucha se registra
+            aquí y se refleja en Finanzas como movimiento de ahorro.
           </p>
         </header>
 
@@ -271,8 +266,8 @@ export default function Eventos() {
         <section className="ev-section glass animate-fade-in">
           <h2 className="section-title">Objetivos de ahorro (huchas)</h2>
           <p className="muted ev-intro">
-            Define un nombre y, si quieres, la meta en euros. Usa «Registrar ahorro» en cada hucha para dejar constancia
-            del dinero ahorrado (también aparece en Finanzas como movimiento).
+            Define un nombre y, si quieres, la meta en euros. Usa «Registrar ahorro» en cada hucha: el importe queda en la
+            hucha y en Finanzas verás el movimiento como «Ahorro (hucha)».
           </p>
 
           <form className="ev-form ev-form-hucha" onSubmit={crearHucha}>
@@ -365,38 +360,6 @@ export default function Eventos() {
         </section>
 
         <style>{`
-          .ev-page-bg {
-            position: relative;
-          }
-          .ev-page-bg::before {
-            content: '';
-            position: fixed;
-            z-index: 0;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            left: 0;
-            pointer-events: none;
-            background-color: #f4f2ee;
-            background-image: linear-gradient(
-                rgba(255, 252, 248, 0.32),
-                rgba(241, 246, 242, 0.42)
-              ),
-              url('/eventos-bg.png');
-            background-size: 100% auto, 100% auto;
-            background-position: center center;
-            background-repeat: no-repeat;
-          }
-          @media (max-width: 1024px) {
-            .ev-page-bg::before {
-              left: 0;
-            }
-          }
-          .ev-page-bg > .dashboard-main {
-            position: relative;
-            z-index: 1;
-          }
-
           .ev-head { margin-bottom: 24px; }
           .dash-sub { color: var(--color-text-muted); margin-top: 8px; font-size: 0.95rem; max-width: 560px; line-height: 1.5; }
           .ev-link { color: var(--color-accent-light); text-decoration: none; font-weight: 600; }

@@ -15,6 +15,10 @@ dist-ssr
 # Secretos locales (Gemini, BD si cambias credenciales)
 .env
 backend/server/.env
+backend/server/.dev-api-port
+
+# Tickets subidos (imagen + OCR + JSON) — Nuevo ticket IA
+backend/server/data/nuevo-ticket/
 
 # SQLite local (MyBrAIn)
 backend/database/*.sqlite

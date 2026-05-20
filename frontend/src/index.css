@@ -1,4 +1,107 @@
+@import url('https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,500;0,600;1,400&family=Poppins:wght@500;600;700&display=swap');
+
 @import "tailwindcss";
+@import "tw-animate-css";
+
+/* ========== Aurora background (Tailwind v4 — animación + variables de color) ========== */
+@theme {
+  --animate-aurora: aurora 60s linear infinite;
+}
+
+@keyframes aurora {
+  from {
+    background-position: 50% 50%, 50% 50%;
+  }
+  to {
+    background-position: 350% 50%, 350% 50%;
+  }
+}
+
+/* Variables usadas por aurora-background (equivalente al plugin flattenColorPalette) */
+:root {
+  --white: #ffffff;
+  --black: #000000;
+  --transparent: transparent;
+  --blue-500: #3b82f6;
+  --blue-400: #60a5fa;
+  --blue-300: #93c5fd;
+  --indigo-300: #a5b4fc;
+  --violet-200: #ddd6fe;
+  /* shadcn / PromptBox */
+  --radius: 0.65rem;
+  --background: #fafafa;
+  --foreground: #1d1d1f;
+  --card: #ffffff;
+  --card-foreground: #1d1d1f;
+  --popover: #ffffff;
+  --popover-foreground: #1d1d1f;
+  --muted: #f5f5f7;
+  --muted-foreground: #86868b;
+  --accent: #f5f5f7;
+  --accent-foreground: #1d1d1f;
+  --border: rgba(0, 0, 0, 0.08);
+  --ring: #0071e3;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.14);
+  border-radius: 4px;
+}
+
+/* ========== Vistas ticket / escáner (Poppins + Lato, tierra) ========== */
+.dashboard-view {
+  font-family: 'Lato', var(--font-main);
+  color: #6b665f;
+  background: transparent;
+  min-height: 100%;
+  border-radius: 0;
+}
+
+/* Aurora visible en todos los módulos (sin capas de imagen a pantalla completa) */
+.dashboard-layout {
+  position: relative;
+}
+
+.dashboard-layout > .dashboard-main {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.dashboard-view .dash-greeting,
+.dashboard-view h1,
+.dashboard-view h2.scanner-section-title,
+.dashboard-view .scanner-section-title {
+  font-family: 'Poppins', var(--font-main);
+  color: #4a453e;
+}
+
+.opaque-card {
+  background-color: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 20px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
 
 /* ========== Tema estilo Apple (neutros + botones negros) ========== */
 :root {
@@ -29,7 +132,7 @@
   --shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
   --shadow-button-hover: 0 4px 16px rgba(0, 0, 0, 0.12);
   /* Sidebar como tarjeta glass alineada con el contenido */
-  --sidebar-width: 260px;
+  --sidebar-width: 286px;
   --sidebar-inset: 14px;
   --sidebar-gap: 12px;
   --layout-sidebar-offset: calc(var(--sidebar-inset) + var(--sidebar-width) + var(--sidebar-gap));
@@ -44,8 +147,7 @@
 
 body {
   font-family: var(--font-main);
-  background: radial-gradient(ellipse 100% 70% at 50% -15%, rgba(0, 0, 0, 0.04), transparent 50%),
-    linear-gradient(180deg, #fafafa 0%, var(--color-bg-dark) 55%);
+  background: #fafafa;
   color: var(--color-text);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;

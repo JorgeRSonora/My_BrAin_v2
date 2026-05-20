@@ -66,3 +66,14 @@ CREATE TABLE IF NOT EXISTS lista_compra (
   CONSTRAINT fk_lista_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
   INDEX idx_lista_user (usuario_id)
 ) ENGINE=InnoDB;
+
+-- Despensa: productos inferidos (p. ej. desde ticket IA); el backend SQLite ya la crea en migración local.
+CREATE TABLE IF NOT EXISTS despensa (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  usuario_id INT NOT NULL,
+  item VARCHAR(200) NOT NULL,
+  origen VARCHAR(50) DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_despensa_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+  INDEX idx_despensa_user (usuario_id)
+) ENGINE=InnoDB;

@@ -291,7 +291,7 @@ export default function Alimentacion() {
       const modo = data.origen === 'ia' ? 'IA' : 'aproximación desde platos'
       const u = data.unidadesAñadidas ?? data.añadidos ?? 0
       const pu = data.productosUnicos ?? 0
-      let msg = `Se sumaron ${u} unidades en ${pu} producto${pu === 1 ? '' : 's'} (${modo}). Total líneas en lista: ${data.totalLista}.`
+      let msg = `Lista de pendientes actualizada: ${pu} producto${pu === 1 ? '' : 's'}, ${u} unidades (${modo}). Total líneas en lista: ${data.totalLista}.`
       if (data.aviso) msg += ` ${data.aviso}`
       setMensajeListaOk(msg)
     } catch (e) {
@@ -342,7 +342,7 @@ export default function Alimentacion() {
   const weekInputValue = useMemo(() => mondayToIsoWeekString(mondayOfWeekContaining(from)), [from])
 
   return (
-    <div className="dashboard-layout ali-page-bg">
+    <div className="dashboard-layout">
       <Sidebar />
       <main className="dashboard-main">
         <header className="ali-head animate-fade-in">
@@ -578,38 +578,6 @@ export default function Alimentacion() {
         </section>
 
         <style>{`
-          .ali-page-bg {
-            position: relative;
-          }
-          .ali-page-bg::before {
-            content: '';
-            position: fixed;
-            z-index: 0;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            left: 0;
-            pointer-events: none;
-            background-color: #f0eeeb;
-            background-image: linear-gradient(
-                rgba(255, 255, 255, 0.22),
-                rgba(245, 242, 238, 0.34)
-              ),
-              url('/alimentacion-bg.jpg');
-            background-size: 100% auto, 100% auto;
-            background-position: center center;
-            background-repeat: no-repeat;
-          }
-          @media (max-width: 1024px) {
-            .ali-page-bg::before {
-              left: 0;
-            }
-          }
-          .ali-page-bg > .dashboard-main {
-            position: relative;
-            z-index: 1;
-          }
-
           .ali-head { margin-bottom: 20px; }
           .dash-sub { color: var(--color-text-muted); margin-top: 6px; font-size: 0.95rem; }
           .ali-error {

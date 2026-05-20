@@ -98,10 +98,10 @@ export default function ListaCompra() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'No se pudo generar la lista')
-      const modo = data.origen === 'ia' ? 'IA' : 'texto'
+      const modo = data.origen === 'ia' ? 'IA' : 'texto del menú'
       const u = data.unidadesAñadidas ?? data.añadidos ?? 0
       const pu = data.productosUnicos ?? 0
-      let msg = `Se sumaron ${u} unidades en ${pu} producto${pu === 1 ? '' : 's'} (${modo}).`
+      let msg = `Pendientes regenerados: ${pu} producto${pu === 1 ? '' : 's'}, ${u} unidades (${modo}).`
       if (data.aviso) msg += ` ${data.aviso}`
       setMensajeOk(msg)
       await loadLista()
@@ -116,7 +116,7 @@ export default function ListaCompra() {
   const hechos = lista.filter((it) => it.comprado)
 
   return (
-    <div className="dashboard-layout lc-page-bg">
+    <div className="dashboard-layout">
       <Sidebar />
       <main className="dashboard-main">
         <header className="lc-head animate-fade-in">
@@ -124,8 +124,10 @@ export default function ListaCompra() {
             Lista de la compra — <span className="gradient-text">todo en un vistazo</span>
           </h1>
           <p className="dash-sub">
-            Cada producto aparece una sola vez; si necesitas más unidades, se muestra como x2, x3… Repite el nombre o usa
-            «Huevos x6» para sumar. Puedes rellenar desde el menú semanal en Alimentación.
+            Los <strong>pendientes</strong> se alinean solos con el <strong>menú de la semana actual</strong> (lunes a
+            domingo) al cargar esta página: se regeneran desde los platos (sin tocar lo ya comprado). Cada producto es
+            único (duplicados se unen sumando unidades) y va en <strong>orden alfabético</strong>. Para más cantidad usa
+            «Huevos x6» o el mismo nombre otra vez.
           </p>
         </header>
 
@@ -141,10 +143,12 @@ export default function ListaCompra() {
         )}
 
         <section className="lc-from-menu glass animate-fade-in">
-          <h2 className="lc-section-title">Desde el menú</h2>
+          <h2 className="lc-section-title">Menú e IA</h2>
           <p className="muted lc-hint">
-            Usa el menú de la <strong>semana actual</strong> (lunes a domingo) y añade a la lista los ingredientes
-            sugeridos. En Alimentación puedes elegir otra semana y generar la lista para ese periodo.
+            La lista de pendientes ya sigue el menú de esta semana al entrar aquí. Este botón <strong>vuelve a generar
+            los pendientes</strong> con IA si el servidor tiene <code>GROQ_API_KEY</code>; si no, usa el mismo troceado
+            de platos que al cargar. En Alimentación puedes elegir otra semana y el botón «Lista desde menú» usa ese
+            rango.
           </p>
           <button
             type="button"
@@ -152,7 +156,7 @@ export default function ListaCompra() {
             onClick={generarDesdeMenuSemanaActual}
             disabled={!userId || generandoDesdeMenu}
           >
-            {generandoDesdeMenu ? 'Generando…' : 'Añadir productos del menú de esta semana'}
+            {generandoDesdeMenu ? 'Actualizando…' : 'Regenerar pendientes desde el menú (esta semana)'}
           </button>
         </section>
 
@@ -225,38 +229,6 @@ export default function ListaCompra() {
         </section>
 
         <style>{`
-          .lc-page-bg {
-            position: relative;
-          }
-          .lc-page-bg::before {
-            content: '';
-            position: fixed;
-            z-index: 0;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            left: 0;
-            pointer-events: none;
-            background-color: #f6f6f6;
-            background-image: linear-gradient(
-                rgba(255, 255, 255, 0.28),
-                rgba(250, 250, 250, 0.42)
-              ),
-              url('/lista-compra-bg.png');
-            background-size: 100% auto, 100% auto;
-            background-position: center center;
-            background-repeat: no-repeat;
-          }
-          @media (max-width: 1024px) {
-            .lc-page-bg::before {
-              left: 0;
-            }
-          }
-          .lc-page-bg > .dashboard-main {
-            position: relative;
-            z-index: 1;
-          }
-
           .lc-head { margin-bottom: 24px; }
           .dash-sub { color: var(--color-text-muted); margin-top: 8px; font-size: 0.95rem; }
           .lc-error {
@@ -277,7 +249,7 @@ export default function ListaCompra() {
           .lc-from-menu {
             padding: 20px 22px;
             border-radius: 18px;
-            max-width: 640px;
+            max-width: min(1100px, 100%);
             margin-bottom: 20px;
           }
           .lc-from-menu .lc-section-title {
@@ -294,7 +266,9 @@ export default function ListaCompra() {
           .lc-card {
             padding: 28px;
             border-radius: 18px;
-            max-width: 640px;
+            max-width: min(1200px, 100%);
+            width: 100%;
+            box-sizing: border-box;
           }
           .lc-add {
             display: flex;
@@ -330,14 +304,20 @@ export default function ListaCompra() {
             list-style: none;
             padding: 0;
             margin: 0 0 8px;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            column-gap: 20px;
+            row-gap: 0;
+            align-items: start;
           }
           .lc-ul li {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 14px 4px;
+            padding: 12px 6px;
             border-bottom: 1px solid var(--color-border);
             gap: 12px;
+            min-width: 0;
           }
           .lc-ul li.done span {
             text-decoration: line-through;

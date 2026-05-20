@@ -1,9 +1,34 @@
 import './load-env.js'
+import http from 'node:http'
+import { writeFileSync, unlinkSync, existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import express from 'express'
 import cors from 'cors'
 import bcrypt from 'bcrypt'
-import { initDatabase, pool } from './sqlite-db.js'
-import { groqGenerateText, parseJsonFromModel } from './ai/groq.js'
+import multer from 'multer'
+import { initDatabase, pool, withTransaction } from './sqlite-db.js'
+import { groqGenerateText, parseJsonFromModel, groqChatCompletion, safeParseJsonFromModel } from './ai/groq.js'
+import { parseTicketFechaOrToday } from './ticketFecha.js'
+import {
+  ocrTicketImage,
+  structureReceiptFromOcr,
+  assertCategoriaGastoEleccion,
+  assertCategoriaIngresoEleccion,
+  CATEGORIAS_GASTO,
+} from './ticketScanService.js'
+import {
+  generateTicketId,
+  initTicketFolder,
+  writeTicketOcrText,
+  writeTicketStructured,
+  writeTicketError,
+  writeTicketConfirmadoEnBd,
+  ticketRelativePathFromServer,
+  listSavedTicketsForUser,
+  ticketSessionDir,
+  getTicketDetailForUser,
+} from './ticketStorage.js'
 
 await initDatabase()
 
@@ -14,7 +39,22 @@ const GROQ_KEY = (() => {
 })()
 
 const app = express()
-const PORT = Number(process.env.PORT) || 3001
+const PREFERRED_PORT = Number(process.env.PORT) || 3001
+const __serverDir = dirname(fileURLToPath(import.meta.url))
+const DEV_API_PORT_FILE = join(__serverDir, '.dev-api-port')
+
+const ticketUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (/^image\/(jpeg|png|webp)$/i.test(file.mimetype)) cb(null, true)
+    else cb(new Error('Formato no permitido. Usa JPG, PNG o WebP.'))
+  },
+})
+
+function parseTicketFechaBody(s) {
+  return parseTicketFechaOrToday(s)
+}
 
 // Middleware
 app.use(cors())
@@ -137,6 +177,48 @@ app.get('/api/finanzas/movimientos', async (req, res) => {
   }
 })
 
+// GET /api/finanzas/gastos-por-categoria — gastos del mes agrupados (manual + tickets)
+app.get('/api/finanzas/gastos-por-categoria', async (req, res) => {
+  const userId = parseUserId(req)
+  if (!userId) return res.status(400).json({ error: 'userId requerido' })
+
+  const year = parseInt(req.query.year, 10) || new Date().getFullYear()
+  const month = parseInt(req.query.month, 10) || new Date().getMonth() + 1
+
+  try {
+    const [rows] = await pool.execute(
+      `SELECT id, monto, categoria, descripcion, fecha
+       FROM movimientos_financieros
+       WHERE usuario_id = ? AND tipo = 'gasto'
+         AND strftime('%Y', fecha) = ? AND CAST(strftime('%m', fecha) AS INTEGER) = ?
+       ORDER BY COALESCE(categoria, '') ASC, fecha DESC, id DESC`,
+      [userId, String(year), month]
+    )
+    const byCat = new Map()
+    for (const r of rows) {
+      const cat = (r.categoria && String(r.categoria).trim()) || 'Sin categoría'
+      if (!byCat.has(cat)) {
+        byCat.set(cat, { categoria: cat, total: 0, lineas: [] })
+      }
+      const g = byCat.get(cat)
+      const m = Number(r.monto) || 0
+      g.total += m
+      g.lineas.push({
+        id: r.id,
+        monto: m,
+        descripcion: r.descripcion,
+        fecha: r.fecha,
+      })
+    }
+    const grupos = Array.from(byCat.values()).sort((a, b) => b.total - a.total)
+    const totalMes = grupos.reduce((s, g) => s + g.total, 0)
+    res.json({ year, month, totalMes, grupos })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Error al cargar gastos por categoría' })
+  }
+})
+
 app.get('/api/finanzas/resumen', async (req, res) => {
   const userId = parseUserId(req)
   if (!userId) return res.status(400).json({ error: 'userId requerido' })
@@ -191,13 +273,34 @@ app.post('/api/finanzas/movimientos', async (req, res) => {
   }
   if (!fecha) return res.status(400).json({ error: 'fecha requerida' })
 
+  let categoriaInsert = categoria?.slice(0, 80) || null
+  if (tipo === 'gasto') {
+    const cat = assertCategoriaGastoEleccion(categoria)
+    if (!cat) {
+      return res.status(400).json({
+        error: `Para gastos elige una categoría: ${CATEGORIAS_GASTO.join(', ')}.`,
+      })
+    }
+    categoriaInsert = cat
+  } else if (tipo === 'ingreso') {
+    const cat = assertCategoriaIngresoEleccion(categoria)
+    if (!cat) {
+      return res.status(400).json({
+        error: 'Para ingresos elige categoría: Nómina u Otros.',
+      })
+    }
+    categoriaInsert = cat
+  } else if (tipo === 'aportacion_hucha') {
+    categoriaInsert = null
+  }
+
   try {
     if (tipo === 'aportacion_hucha') {
-      const [[jar]] = await pool.execute(`SELECT id FROM huchas_ahorro WHERE id = ? AND usuario_id = ?`, [
+      const [huchaRows] = await pool.execute(`SELECT id FROM huchas_ahorro WHERE id = ? AND usuario_id = ?`, [
         hid,
         userId,
       ])
-      if (!jar) return res.status(400).json({ error: 'Hucha no encontrada' })
+      if (!huchaRows?.length) return res.status(400).json({ error: 'Hucha no encontrada' })
     }
 
     const [result] = await pool.execute(
@@ -207,7 +310,7 @@ app.post('/api/finanzas/movimientos', async (req, res) => {
         userId,
         tipo,
         cantidad,
-        categoria?.slice(0, 80) || null,
+        categoriaInsert,
         descripcion?.slice(0, 500) || null,
         fecha,
         tipo === 'aportacion_hucha' ? hid : null,
@@ -228,7 +331,7 @@ app.post('/api/finanzas/movimientos', async (req, res) => {
         usuario_id: userId,
         tipo,
         monto: cantidad,
-        categoria,
+        categoria: categoriaInsert,
         descripcion,
         fecha,
         hucha_id: tipo === 'aportacion_hucha' ? hid : null,
@@ -466,6 +569,44 @@ function normListaItem(s) {
     .slice(0, 200)
 }
 
+/** Ítems que no son compra: eco de modelo, “IA (…)”, slugs Groq/OpenAI, etc. */
+function itemListaCompraEsRuidoTecnico(s) {
+  const raw = normListaItem(s)
+  if (!raw) return true
+  const t = raw.toLowerCase()
+  if (/^ia\s*\(/.test(t)) return true
+  if (/^modelo\s*\(/.test(t)) return true
+  if (/\(llama[-.]\d/i.test(raw) || /\(gpt[-_\d]/i.test(raw) || /\(claude/i.test(raw)) return true
+  if (/\bmeta[-_]?llama\b/i.test(t)) return true
+  if (/-versatile\b/i.test(t) || /\d+b-versatile/i.test(t)) return true
+  if (/\bllama[-_.]\d+\.\d+/i.test(t)) return true
+  if (/\bgroq\b|\bopenai\b|\banthropic\b/i.test(t)) return true
+  if (/\bgpt[-_]?\d/i.test(t) || /\bclaude[-_]?\d/i.test(t)) return true
+  return false
+}
+
+function filtrarProductosListaCompra(arr) {
+  if (!Array.isArray(arr)) return []
+  const out = []
+  for (const p of arr) {
+    if (p == null) continue
+    const s = typeof p === 'string' ? p.trim() : typeof p === 'number' && Number.isFinite(p) ? String(p) : ''
+    if (!s || itemListaCompraEsRuidoTecnico(s)) continue
+    out.push(s)
+  }
+  return out
+}
+
+/** Quita filas ya guardadas que sean ruido técnico (p. ej. eco del modelo en JSON). */
+async function eliminarListaCompraItemsRuidoTecnico(userId) {
+  const [rows] = await pool.execute(`SELECT id, item FROM lista_compra WHERE usuario_id = ?`, [userId])
+  for (const r of rows || []) {
+    if (itemListaCompraEsRuidoTecnico(r.item)) {
+      await pool.execute(`DELETE FROM lista_compra WHERE id = ? AND usuario_id = ?`, [r.id, userId])
+    }
+  }
+}
+
 /** "Huevos x3" → nombre canónico + factor (para sumar sin filas duplicadas). */
 function splitListaNombreCantidad(itemStr) {
   const t = normListaItem(itemStr)
@@ -482,7 +623,7 @@ function aggregateProductosLista(productos) {
   const map = new Map()
   for (const p of productos) {
     const item = normListaItem(p)
-    if (!item) continue
+    if (!item || itemListaCompraEsRuidoTecnico(item)) continue
     const { nombre, qtyMul } = splitListaNombreCantidad(item)
     const canon = nombre
     if (!canon) continue
@@ -500,7 +641,7 @@ async function listaCompraSumarCantidad(userId, nombreRaw, unidadesExtra = 1) {
   const canon = normListaItem(nombre).slice(0, 200)
   const u = Math.floor(Number(unidadesExtra) || 1)
   const add = Math.min(9999, Math.max(1, u * qtyMul))
-  if (!canon || add <= 0) return { ok: false, unidades: 0 }
+  if (!canon || add <= 0 || itemListaCompraEsRuidoTecnico(canon)) return { ok: false, unidades: 0 }
 
   const [rows] = await pool.execute(
     `SELECT id, COALESCE(cantidad, 1) AS cantidad FROM lista_compra WHERE usuario_id = ? AND LOWER(TRIM(item)) = LOWER(?)`,
@@ -522,6 +663,61 @@ async function listaCompraSumarCantidad(userId, nombreRaw, unidadesExtra = 1) {
   return { ok: true, unidades: add }
 }
 
+/**
+ * Une filas duplicadas (mismo producto normalizado y mismo comprado) sumando cantidades.
+ * Mantiene el id más bajo y borra el resto.
+ */
+async function consolidarListaCompraSiDuplicados(userId) {
+  const [rows] = await pool.execute(
+    `SELECT id, item, COALESCE(cantidad, 1) AS cantidad, comprado FROM lista_compra WHERE usuario_id = ?`,
+    [userId]
+  )
+  if (!rows?.length) return
+
+  const groups = new Map()
+  for (const r of rows) {
+    const { nombre, qtyMul } = splitListaNombreCantidad(r.item)
+    const canon = normListaItem(nombre).slice(0, 200)
+    if (!canon) continue
+    const comprado = Number(r.comprado) === 1 ? 1 : 0
+    const key = `${canon.toLowerCase()}\u0000${comprado}`
+    const cantBase = Math.min(9999, Math.max(1, Number(r.cantidad) || 1))
+    const add = Math.min(9999, cantBase * qtyMul)
+    if (!groups.has(key)) {
+      groups.set(key, { ids: [r.id], totalQty: add, canon, comprado })
+    } else {
+      const g = groups.get(key)
+      g.ids.push(r.id)
+      g.totalQty = Math.min(9999, g.totalQty + add)
+    }
+  }
+
+  const ops = []
+  for (const g of groups.values()) {
+    if (g.ids.length < 2) continue
+    g.ids.sort((a, b) => a - b)
+    const keepId = g.ids[0]
+    const deleteIds = g.ids.slice(1)
+    ops.push({ keepId, deleteIds, canon: g.canon, totalQty: Math.min(9999, Math.max(1, g.totalQty)), comprado: g.comprado })
+  }
+  if (!ops.length) return
+
+  await withTransaction(async (tx) => {
+    for (const op of ops) {
+      await tx.run(`UPDATE lista_compra SET item = ?, cantidad = ?, comprado = ? WHERE id = ? AND usuario_id = ?`, [
+        op.canon,
+        op.totalQty,
+        op.comprado,
+        op.keepId,
+        userId,
+      ])
+      for (const id of op.deleteIds) {
+        await tx.run(`DELETE FROM lista_compra WHERE id = ? AND usuario_id = ?`, [id, userId])
+      }
+    }
+  })
+}
+
 /** Si no hay IA: fragmenta platos en trozos; permite repetidos para luego agrupar xN. */
 function listaProductosDesdeMenuPorTexto(rows) {
   const out = []
@@ -531,6 +727,7 @@ function listaProductosDesdeMenuPorTexto(rows) {
     for (let b of bits) {
       b = normListaItem(b)
       if (b.length < 2 || b.length > 90) continue
+      if (itemListaCompraEsRuidoTecnico(b)) continue
       out.push(b.charAt(0).toUpperCase() + b.slice(1))
     }
   }
@@ -550,6 +747,7 @@ A partir del menú siguiente, deduce una lista de COMPRA de supermercado: ingred
 - Cantidades opcionales entre paréntesis si ayuda (ej. "Leche entera (1 L)").
 - Entre 15 y 55 ítems según complejidad del menú.
 - Nombres cortos en español.
+- Nunca incluyas nombres de modelos de IA, la palabra "Groq", "OpenAI", "IA (…)", JSON ni metadatos: solo productos de supermercado.
 
 Responde ÚNICAMENTE con JSON válido (sin markdown ni texto extra):
 {"productos":["ítem 1","ítem 2",...]}
@@ -566,7 +764,58 @@ ${lines.join('\n')}`
   if (!Array.isArray(arr) || arr.length === 0) {
     throw new Error('La IA no devolvió la lista en el formato esperado.')
   }
-  return arr.map(normListaItem).filter(Boolean).slice(0, 60)
+  const limpios = filtrarProductosListaCompra(arr)
+  if (!limpios.length) {
+    throw new Error('La IA no devolvió productos válidos tras filtrar la respuesta.')
+  }
+  return limpios.map(normListaItem).filter(Boolean).slice(0, 60)
+}
+
+/**
+ * Sustituye todos los pendientes (comprado = 0) por ítems derivados del menú dado.
+ * Los ítems ya comprados no se modifican.
+ * preferGroq: true intenta Groq; false solo texto (rápido, p. ej. al cargar la lista).
+ * Si no se puede extraer ningún producto, no borra la lista pendiente actual.
+ */
+async function reemplazarListaPendienteDesdeMenus(userId, menus, preferGroq) {
+  if (!menus?.length) {
+    return { ok: false, razon: 'sin_menu', origen: null, agregados: [], productos: [] }
+  }
+  let productos = []
+  let origen = 'texto'
+  if (preferGroq && GROQ_KEY) {
+    try {
+      productos = await listaProductosGroqDesdeMenu(GROQ_KEY, menus)
+      origen = 'ia'
+    } catch (e) {
+      console.warn('[lista menú]', e?.message || e)
+      productos = listaProductosDesdeMenuPorTexto(menus)
+      origen = 'texto'
+    }
+  } else {
+    productos = listaProductosDesdeMenuPorTexto(menus)
+  }
+
+  const agregados = aggregateProductosLista(productos)
+  if (!agregados.length) {
+    console.warn('[lista menú] sin productos extraíbles; no se alteran pendientes')
+    return { ok: false, razon: 'sin_productos', origen, agregados: [], productos }
+  }
+
+  await withTransaction(async (tx) => {
+    await tx.run(`DELETE FROM lista_compra WHERE usuario_id = ? AND comprado = 0`, [userId])
+    for (const row of agregados) {
+      const canon = normListaItem(row.nombre).slice(0, 200)
+      const qty = Math.min(9999, Math.max(1, Number(row.cantidad) || 1))
+      if (!canon) continue
+      await tx.run(
+        `INSERT INTO lista_compra (usuario_id, item, cantidad, comprado) VALUES (?, ?, ?, 0)`,
+        [userId, canon, qty]
+      )
+    }
+  })
+  await consolidarListaCompraSiDuplicados(userId)
+  return { ok: true, origen, agregados, productos }
 }
 
 function sqliteFriendlyError(err, accion) {
@@ -692,11 +941,37 @@ app.get('/api/alimentacion/lista', async (req, res) => {
   if (!userId) return res.status(400).json({ error: 'userId requerido' })
 
   try {
+    await consolidarListaCompraSiDuplicados(userId)
+    await eliminarListaCompraItemsRuidoTecnico(userId)
+
+    const hoy = new Date().toISOString().slice(0, 10)
+    const from = mondayOfWeekContaining(hoy)
+    const to = addDaysIso(from, 6)
+    const [menusSemana] = await pool.execute(
+      `SELECT fecha, momento, plato, notas FROM comidas_menu
+       WHERE usuario_id = ? AND fecha BETWEEN ? AND ?
+       ORDER BY fecha,
+         CASE momento WHEN 'desayuno' THEN 1 WHEN 'comida' THEN 2 WHEN 'cena' THEN 3 ELSE 4 END`,
+      [userId, from, to]
+    )
+
+    const menuSemanaSync = {
+      semana: { from, to },
+      hayMenu: menusSemana.length > 0,
+      pendientesActualizados: false,
+      origen: null,
+    }
+    if (menusSemana.length > 0) {
+      const sync = await reemplazarListaPendienteDesdeMenus(userId, menusSemana, false)
+      menuSemanaSync.pendientesActualizados = Boolean(sync.ok)
+      menuSemanaSync.origen = sync.origen
+    }
+
     const [rows] = await pool.execute(
-      `SELECT id, item, COALESCE(cantidad, 1) AS cantidad, comprado FROM lista_compra WHERE usuario_id = ? ORDER BY comprado ASC, id DESC`,
+      `SELECT id, item, COALESCE(cantidad, 1) AS cantidad, comprado FROM lista_compra WHERE usuario_id = ? ORDER BY comprado ASC, item COLLATE NOCASE ASC`,
       [userId]
     )
-    res.json({ items: rows })
+    res.json({ items: rows, menuSemanaSync })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: sqliteFriendlyError(err, 'Error al cargar lista') })
@@ -763,10 +1038,9 @@ app.delete('/api/alimentacion/lista/:id', async (req, res) => {
 })
 
 /**
- * Genera ítems de lista de compra a partir del menú en [from, to].
- * Sin from/to: usa la semana ISO actual (lunes–domingo).
- * Con IA (Groq): ingredientes razonables; si falla o no hay clave: trocea platos (menos preciso).
- * Los nuevos ítems se fusionan con la lista existente (sin duplicar por nombre, ignorando mayúsculas).
+ * Regenera los pendientes de la lista desde el menú en [from, to] (los comprados no se tocan).
+ * Sin from/to: semana actual (lunes–domingo).
+ * Con GROQ_API_KEY: intenta ingredientes con IA; si no hay clave o falla: mismo criterio que al cargar la lista (texto).
  */
 app.post('/api/alimentacion/lista/desde-menu', async (req, res) => {
   const userId = parseUserId(req)
@@ -796,31 +1070,23 @@ app.post('/api/alimentacion/lista/desde-menu', async (req, res) => {
       })
     }
 
-    let productos = []
-    let origen = 'texto'
-    if (GROQ_KEY) {
-      try {
-        productos = await listaProductosGroqDesdeMenu(GROQ_KEY, menus)
-        origen = 'ia'
-      } catch (e) {
-        console.warn('[lista desde menú] IA:', e?.message || e)
-        productos = listaProductosDesdeMenuPorTexto(menus)
-        origen = 'texto'
-      }
-    } else {
-      productos = listaProductosDesdeMenuPorTexto(menus)
+    const sync = await reemplazarListaPendienteDesdeMenus(userId, menus, Boolean(GROQ_KEY))
+    if (!sync.ok && sync.razon === 'sin_productos') {
+      return res.status(400).json({
+        error:
+          'No se pudieron extraer productos del menú. Usa nombres de plato más descriptivos o revisa las notas.',
+      })
+    }
+    if (!sync.ok) {
+      return res.status(400).json({ error: 'No se pudo actualizar la lista desde el menú.' })
     }
 
-    const agregados = aggregateProductosLista(productos)
-    let unidadesAñadidas = 0
-    let lineasTocadas = 0
-    for (const row of agregados) {
-      const r = await listaCompraSumarCantidad(userId, row.nombre, row.cantidad)
-      if (r.ok) {
-        lineasTocadas += 1
-        unidadesAñadidas += r.unidades
-      }
-    }
+    const { origen, agregados, productos } = sync
+    const unidadesAñadidas = agregados.reduce(
+      (s, row) => s + Math.min(9999, Math.max(1, Number(row.cantidad) || 1)),
+      0
+    )
+    const lineasTocadas = agregados.length
 
     const [totalRows] = await pool.execute(
       `SELECT COUNT(*) AS n FROM lista_compra WHERE usuario_id = ?`,
@@ -839,7 +1105,7 @@ app.post('/api/alimentacion/lista/desde-menu', async (req, res) => {
       totalLista,
       aviso:
         origen === 'texto'
-          ? 'Lista aproximada desde los nombres de los platos. Para ingredientes más útiles, configura GROQ_API_KEY en el servidor.'
+          ? 'Lista aproximada desde los nombres de los platos. Con GROQ_API_KEY el botón puede usar IA para ingredientes más útiles.'
           : undefined,
     })
   } catch (err) {
@@ -1100,13 +1366,655 @@ No inventes cifras. Usa Markdown simple (títulos ## y listas con -).`
 })
 
 // ============================================
-// Iniciar servidor
+// IA — Chat, lista por pasillos, insights, ticket
 // ============================================
-app.listen(PORT, () => {
-  console.log(`🧠 MyBrAIn Server corriendo en http://localhost:${PORT}`)
-  if (GROQ_KEY) {
-    console.log('🤖 IA: Groq configurada (menú semanal + informes financieros)')
-  } else {
-    console.log('💡 IA: añade GROQ_API_KEY en server/.env — https://console.groq.com/')
+
+function calendarPrevMonth(year, month) {
+  if (month <= 1) return { year: year - 1, month: 12 }
+  return { year, month: month - 1 }
+}
+
+async function fetchChatContextForUser(userId) {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth() + 1
+  const hoy = now.toISOString().slice(0, 10)
+  const from = mondayOfWeekContaining(hoy)
+  const to = addDaysIso(from, 6)
+
+  const [movs] = await pool.execute(
+    `SELECT tipo, monto, categoria, descripcion, fecha
+     FROM movimientos_financieros
+     WHERE usuario_id = ? AND strftime('%Y', fecha) = ? AND CAST(strftime('%m', fecha) AS INTEGER) = ?
+     ORDER BY fecha DESC, id DESC
+     LIMIT 100`,
+    [userId, String(y), m]
+  )
+  const [menus] = await pool.execute(
+    `SELECT fecha, momento, plato, notas FROM comidas_menu
+     WHERE usuario_id = ? AND fecha BETWEEN ? AND ?
+     ORDER BY fecha,
+       CASE momento WHEN 'desayuno' THEN 1 WHEN 'comida' THEN 2 WHEN 'cena' THEN 3 ELSE 4 END`,
+    [userId, from, to]
+  )
+
+  return {
+    mesActual: `${y}-${String(m).padStart(2, '0')}`,
+    movimientosMesActual: movs,
+    menuSemanaActual: { desde: from, hasta: to, platos: menus },
+  }
+}
+
+async function gastosPorCategoriaMes(userId, year, month) {
+  const [rows] = await pool.execute(
+    `SELECT COALESCE(NULLIF(TRIM(categoria), ''), '(sin categoría)') AS categoria,
+            COALESCE(SUM(monto), 0) AS total
+     FROM movimientos_financieros
+     WHERE usuario_id = ? AND tipo = 'gasto'
+       AND strftime('%Y', fecha) = ? AND CAST(strftime('%m', fecha) AS INTEGER) = ?
+     GROUP BY 1
+     ORDER BY total DESC`,
+    [userId, String(year), month]
+  )
+  return rows.map((r) => ({ categoria: r.categoria, total: Number(r.total) }))
+}
+
+async function smartListPasillosGroq(apiKey, menus) {
+  const lines = menus.map(
+    (r) => `- ${r.fecha} (${r.momento}): ${r.plato}${r.notas ? `. Notas: ${r.notas}` : ''}`
+  )
+  const prompt = `A partir de este listado de platos:
+${lines.join('\n')}
+
+Extrae los ingredientes necesarios. Devuelve ÚNICAMENTE un objeto JSON válido con las claves como pasillos del supermercado (ej. 'Frutería', 'Carnicería', 'Lácteos') y los valores como arrays de strings con los ingredientes. No añadas texto Markdown extra.`
+
+  const { text } = await groqGenerateText(apiKey, prompt, {
+    temperature: 0.25,
+    maxOutputTokens: 4096,
+  })
+  const parsed = safeParseJsonFromModel(text)
+  if (!parsed.ok) {
+    throw new Error(`JSON de la IA no válido: ${parsed.error}`)
+  }
+  const obj = parsed.value
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+    throw new Error('La IA no devolvió un objeto JSON en la raíz.')
+  }
+  const pasillos = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (!k || typeof k !== 'string') continue
+    if (!Array.isArray(v)) continue
+    const arr = v.map((x) => String(x).trim()).filter(Boolean)
+    if (arr.length) pasillos[k.trim().slice(0, 80)] = arr
+  }
+  if (Object.keys(pasillos).length === 0) {
+    throw new Error('La IA devolvió pasillos vacíos o formato incorrecto.')
+  }
+  return pasillos
+}
+
+// POST /api/chat — contexto mes + menú semana en system prompt
+app.post('/api/chat', async (req, res) => {
+  const userId = parseUserId(req)
+  const { message, history } = req.body || {}
+
+  if (!userId) return res.status(400).json({ error: 'userId requerido' })
+  if (!message || !String(message).trim()) {
+    return res.status(400).json({ error: 'message requerido' })
+  }
+  if (!GROQ_KEY) {
+    return res.status(503).json({
+      error: 'IA no configurada. Añade GROQ_API_KEY en backend/server/.env (https://console.groq.com/).',
+    })
+  }
+
+  try {
+    const ctx = await fetchChatContextForUser(userId)
+    const inyectado = JSON.stringify(ctx, null, 0)
+    const system = `Eres el asistente de MybrAIn. Responde a la pregunta del usuario basándote ÚNICAMENTE en estos datos financieros y de nutrición del usuario: ${inyectado}. Sé breve y directo. Si no hay datos suficientes, indícalo sin inventar cifras.`
+
+    const hist = Array.isArray(history)
+      ? history
+          .slice(-16)
+          .map((h) => ({
+            role: h.role === 'assistant' ? 'assistant' : 'user',
+            content: String(h.content || '').trim().slice(0, 8000),
+          }))
+          .filter((h) => h.content)
+      : []
+
+    const messages = [
+      { role: 'system', content: system },
+      ...hist,
+      { role: 'user', content: String(message).trim().slice(0, 8000) },
+    ]
+
+    const { text, model } = await groqChatCompletion(GROQ_KEY, messages, {
+      temperature: 0.45,
+      maxOutputTokens: 2048,
+    })
+    res.json({ reply: text, model })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: err.message || 'Error en el chat' })
   }
 })
+
+// POST /api/smart-list — JSON por pasillos (no escribe en lista_compra)
+app.post('/api/smart-list', async (req, res) => {
+  const userId = parseUserId(req)
+  let { from, to } = req.body || {}
+
+  if (!userId) return res.status(400).json({ error: 'userId requerido' })
+  if (!GROQ_KEY) {
+    return res.status(503).json({
+      error: 'IA no configurada. Añade GROQ_API_KEY en backend/server/.env (https://console.groq.com/).',
+    })
+  }
+
+  if (!from || !to) {
+    const hoy = new Date().toISOString().slice(0, 10)
+    from = mondayOfWeekContaining(hoy)
+    to = addDaysIso(from, 6)
+  }
+
+  try {
+    const [menus] = await pool.execute(
+      `SELECT fecha, momento, plato, notas FROM comidas_menu
+       WHERE usuario_id = ? AND fecha BETWEEN ? AND ?
+       ORDER BY fecha,
+         CASE momento WHEN 'desayuno' THEN 1 WHEN 'comida' THEN 2 WHEN 'cena' THEN 3 ELSE 4 END`,
+      [userId, from, to]
+    )
+    if (!menus.length) {
+      return res.status(400).json({
+        error:
+          'No hay platos en el menú para ese periodo. Rellena el menú en Alimentación primero.',
+      })
+    }
+
+    const pasillos = await smartListPasillosGroq(GROQ_KEY, menus)
+    res.json({ ok: true, periodo: { from, to }, pasillos })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: err.message || 'No se pudo generar la lista inteligente' })
+  }
+})
+
+// POST /api/insights — comparativa mes actual vs anterior + JSON 3 textos
+app.post('/api/insights', async (req, res) => {
+  const userId = parseUserId(req)
+
+  if (!userId) return res.status(400).json({ error: 'userId requerido' })
+  if (!GROQ_KEY) {
+    return res.status(503).json({
+      error: 'IA no configurada. Añade GROQ_API_KEY en backend/server/.env (https://console.groq.com/).',
+    })
+  }
+
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth() + 1
+  const prev = calendarPrevMonth(y, m)
+
+  try {
+    const actual = await gastosPorCategoriaMes(userId, y, m)
+    const anterior = await gastosPorCategoriaMes(userId, prev.year, prev.month)
+    const totActual = actual.reduce((s, r) => s + r.total, 0)
+    const totAnt = anterior.reduce((s, r) => s + r.total, 0)
+
+    const payload = {
+      mesActual: `${y}-${String(m).padStart(2, '0')}`,
+      mesAnterior: `${prev.year}-${String(prev.month).padStart(2, '0')}`,
+      totalGastosActual: totActual,
+      totalGastosAnterior: totAnt,
+      porCategoriaActual: actual,
+      porCategoriaAnterior: anterior,
+    }
+
+    const prompt = `Analiza estos gastos mensuales (solo tipo "gasto"):
+${JSON.stringify(payload, null, 0)}
+
+Genera 3 insights breves (máximo 2 líneas cada uno) en formato JSON ÚNICO sin markdown ni texto extra:
+{"positivo":"...","alerta":"...","consejo":"..."}
+- positivo: felicita por algo positivo (datos reales).
+- alerta: señala una categoría donde se gasta mucho o empeoró respecto al mes anterior.
+- consejo: consejo genérico de ahorro o nutrición cruzada con el contexto de gastos.
+No inventes cifras que no estén en el JSON.`
+
+    const { text, model } = await groqGenerateText(GROQ_KEY, prompt, { temperature: 0.4, maxOutputTokens: 1024 })
+    const parsed = safeParseJsonFromModel(text)
+    if (!parsed.ok) {
+      return res.status(502).json({
+        error: 'La IA no devolvió JSON válido.',
+        datos: payload,
+        raw: parsed.raw,
+      })
+    }
+    const v = parsed.value
+    if (typeof v !== 'object' || v === null) {
+      return res.status(502).json({ error: 'Formato de insights incorrecto.', datos: payload })
+    }
+    res.json({
+      ok: true,
+      model,
+      datos: payload,
+      insights: {
+        positivo: String(v.positivo || '').trim(),
+        alerta: String(v.alerta || '').trim(),
+        consejo: String(v.consejo || '').trim(),
+      },
+    })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: err.message || 'Error al generar insights' })
+  }
+})
+
+// GET /api/tickets-guardados — lista tickets guardados en disco (por usuario)
+app.get('/api/tickets-guardados', (req, res) => {
+  const userId = parseUserId(req)
+  if (!userId) return res.status(400).json({ error: 'userId requerido' })
+  try {
+    const tickets = listSavedTicketsForUser(userId)
+    res.json({
+      tickets,
+      carpetaUsuarioRelativa: ['data', 'nuevo-ticket', 'uploads', String(userId)].join('/'),
+    })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'No se pudo listar los tickets guardados' })
+  }
+})
+
+// GET /api/ticket-detalle — OCR, fechas y metadatos de un ticket guardado (mismo usuario)
+app.get('/api/ticket-detalle', (req, res) => {
+  const userId = parseUserId(req)
+  const ticketId = String(req.query.ticketId || '').trim()
+  if (!userId || !ticketId) {
+    return res.status(400).json({ error: 'userId y ticketId requeridos' })
+  }
+  if (/[\\/]/.test(ticketId) || ticketId.length > 200) {
+    return res.status(400).json({ error: 'ticketId inválido' })
+  }
+  try {
+    const detail = getTicketDetailForUser(userId, ticketId)
+    if (!detail) return res.status(404).json({ error: 'Ticket no encontrado' })
+    res.json(detail)
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'No se pudo leer el detalle del ticket' })
+  }
+})
+
+// GET /api/ticket-archivo/imagen — miniatura del ticket (mismo usuario)
+app.get('/api/ticket-archivo/imagen', (req, res) => {
+  const userId = parseUserId(req)
+  const ticketId = String(req.query.ticketId || '').trim()
+  if (!userId || !ticketId || /[\\/]/.test(ticketId) || ticketId.length > 200) {
+    return res.status(400).json({ error: 'userId y ticketId requeridos' })
+  }
+  const dir = ticketSessionDir(userId, ticketId)
+  if (!existsSync(dir)) {
+    return res.status(404).end()
+  }
+  const candidates = [
+    ['.jpg', 'image/jpeg'],
+    ['.png', 'image/png'],
+    ['.webp', 'image/webp'],
+  ]
+  for (const [ext, ct] of candidates) {
+    const filePath = join(dir, `imagen${ext}`)
+    if (existsSync(filePath)) {
+      res.setHeader('Content-Type', ct)
+      return res.sendFile(filePath, (err) => {
+        if (err && !res.headersSent) res.status(500).end()
+      })
+    }
+  }
+  const fallback = join(dir, 'imagen.img')
+  if (existsSync(fallback)) {
+    res.setHeader('Content-Type', 'application/octet-stream')
+    return res.sendFile(fallback)
+  }
+  res.status(404).end()
+})
+
+// POST /api/scan-ticket — imagen → OCR (Tesseract) → JSON (Groq); no guarda en BD
+app.post(
+  '/api/scan-ticket',
+  (req, res, next) => {
+    ticketUpload.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message || 'Error al subir el archivo' })
+      next()
+    })
+  },
+  async (req, res) => {
+    const uid = parseInt(String(req.body?.userId ?? ''), 10)
+    if (!Number.isFinite(uid) || uid <= 0) {
+      return res.status(400).json({ error: 'userId obligatorio en el formulario (campo userId).' })
+    }
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'Falta la imagen (campo de archivo "file").' })
+    }
+
+    const ticketId = generateTicketId()
+    const mime = req.file.mimetype || 'image/jpeg'
+    const originalname = req.file.originalname || null
+
+    const respCarpeta = () => ({
+      ticketId,
+      carpetaRelativa: ticketRelativePathFromServer(uid, ticketId),
+    })
+
+    try {
+      initTicketFolder(uid, ticketId, req.file.buffer, mime, originalname)
+    } catch (e) {
+      console.error('[scan-ticket] disco:', e)
+      return res.status(500).json({ error: 'No se pudo guardar la imagen del ticket en disco.' })
+    }
+
+    if (!GROQ_KEY) {
+      try {
+        writeTicketError(uid, ticketId, 'IA no configurada (GROQ_API_KEY). Imagen guardada en carpeta local.')
+      } catch {
+        /* */
+      }
+      return res.status(503).json({
+        error: 'IA no configurada. Añade GROQ_API_KEY en backend/server/.env (https://console.groq.com/).',
+        ...respCarpeta(),
+      })
+    }
+
+    let rawOcr = ''
+    try {
+      rawOcr = await ocrTicketImage(req.file.buffer)
+      writeTicketOcrText(uid, ticketId, rawOcr)
+    } catch (e) {
+      const msg = e?.message || String(e)
+      try {
+        writeTicketError(uid, ticketId, `OCR: ${msg}`)
+      } catch {
+        /* */
+      }
+      return res.status(500).json({
+        error: msg || 'Error en OCR',
+        ...respCarpeta(),
+      })
+    }
+
+    if (rawOcr.length < 10) {
+      try {
+        writeTicketError(uid, ticketId, 'OCR insuficiente: texto demasiado corto.')
+      } catch {
+        /* */
+      }
+      return res.status(422).json({
+        error:
+          'OCR insuficiente: no se leyó texto claro en la imagen. Prueba más luz, encuadre o sube una foto nítida.',
+        ocrPreview: rawOcr,
+        ...respCarpeta(),
+      })
+    }
+
+    try {
+      const { model, structured } = await structureReceiptFromOcr(GROQ_KEY, rawOcr)
+      writeTicketStructured(uid, ticketId, model, structured)
+      res.json({
+        ok: true,
+        model,
+        ocrTextPreview: rawOcr.slice(0, 2000),
+        structured,
+        ...respCarpeta(),
+      })
+    } catch (err) {
+      console.error('[scan-ticket]', err)
+      try {
+        writeTicketError(uid, ticketId, err?.message || String(err))
+      } catch {
+        /* */
+      }
+      res.status(500).json({
+        error: err.message || 'Error al analizar el ticket',
+        modelText: err.modelText,
+        raw: err.raw,
+        ...respCarpeta(),
+      })
+    }
+  }
+)
+
+// POST /api/save-ticket — confirma datos ya revisados (escáner o manual)
+app.post('/api/save-ticket', async (req, res) => {
+  const userId = parseUserId(req)
+  const { total, entidad, fecha, items, categoria, ticketId: ticketIdBody } = req.body || {}
+
+  if (!userId) return res.status(400).json({ error: 'userId requerido' })
+
+  const monto = Math.abs(Number(total))
+  const comercio = String(entidad || '').trim().slice(0, 120) || 'Comercio'
+  const fechaMov = parseTicketFechaBody(fecha)
+  const cat = assertCategoriaGastoEleccion(categoria)
+  if (!cat) {
+    return res.status(400).json({
+      error: `Elige una categoría válida: ${CATEGORIAS_GASTO.join(', ')}.`,
+    })
+  }
+  const listaItems = Array.isArray(items) ? items.map((x) => String(x).trim()).filter(Boolean) : []
+  const ticketIdRaw = typeof ticketIdBody === 'string' ? ticketIdBody.trim() : ''
+  const ticketId =
+    ticketIdRaw &&
+    !/[\\/]/.test(ticketIdRaw) &&
+    ticketIdRaw.length <= 180 &&
+    ticketIdRaw.length >= 10
+      ? ticketIdRaw
+      : null
+
+  if (!Number.isFinite(monto) || monto <= 0) {
+    return res.status(400).json({ error: 'total inválido' })
+  }
+
+  const descripcion = `Compra en ${comercio}`.slice(0, 500)
+
+  try {
+    await withTransaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO movimientos_financieros (usuario_id, tipo, monto, categoria, descripcion, fecha, hucha_id)
+         VALUES (?, 'gasto', ?, ?, ?, ?, NULL)`,
+        [userId, monto, cat, descripcion, fechaMov]
+      )
+      for (const it of listaItems.slice(0, 200)) {
+        await tx.run(`INSERT INTO despensa (usuario_id, item, origen) VALUES (?, ?, ?)`, [
+          userId,
+          it.slice(0, 200),
+          'ticket_scan',
+        ])
+      }
+    })
+
+    if (ticketId) {
+      writeTicketConfirmadoEnBd(userId, ticketId, {
+        monto,
+        categoria: cat,
+        entidad: comercio,
+        fecha: fechaMov,
+        itemsEnDespensa: Math.min(listaItems.length, 200),
+      })
+    }
+
+    res.json({
+      ok: true,
+      guardado: {
+        monto,
+        categoria: cat,
+        entidad: comercio,
+        fecha: fechaMov,
+        itemsEnDespensa: Math.min(listaItems.length, 200),
+        ticketIdArchivo: ticketId,
+      },
+    })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: err.message || 'Error al guardar el ticket' })
+  }
+})
+
+// POST /api/process-ticket — Groq interpreta texto; categoría la elige el usuario en el cliente
+app.post('/api/process-ticket', async (req, res) => {
+  const userId = parseUserId(req)
+  const { texto, categoria } = req.body || {}
+
+  if (!userId) return res.status(400).json({ error: 'userId requerido' })
+  if (!texto || !String(texto).trim()) {
+    return res.status(400).json({ error: 'texto requerido (contenido del ticket)' })
+  }
+  const cat = assertCategoriaGastoEleccion(categoria)
+  if (!cat) {
+    return res.status(400).json({
+      error: `Elige una categoría válida: ${CATEGORIAS_GASTO.join(', ')}.`,
+    })
+  }
+  if (!GROQ_KEY) {
+    return res.status(503).json({
+      error: 'IA no configurada. Añade GROQ_API_KEY en backend/server/.env (https://console.groq.com/).',
+    })
+  }
+
+  const rawTicket = String(texto).trim().slice(0, 14000)
+  const prompt = `Analiza el texto de un ticket de compra (puede venir pegado o ser salida de OCR). Devuelve ÚNICAMENTE un JSON válido, sin markdown ni texto extra:
+{"total": <float>, "entidad": "<nombre comercial en español, limpio>", "fecha": "<YYYY-MM-DD o null>", "items": [<strings>]}
+
+Reglas:
+- "total": importe total a pagar (número).
+- "entidad": nombre del establecimiento; corrige errores evidentes de OCR; sin texto legal largo.
+- "fecha": fecha de la compra en ISO; si en el ticket está DD/MM/AAAA, convierte; si no hay fecha clara, null.
+- "items": solo productos o líneas de producto legibles en español, una cadena por producto, nombre breve (≤ ~70 caracteres), sin cabeceras de tabla, sin "TOTAL"/"IVA"/"CAMBIO", sin líneas solo numéricas. Corrige ruido típico de OCR en los nombres. Si no hay productos claros, [].
+
+Texto del ticket:
+${rawTicket}`
+
+  try {
+    const { text, model } = await groqGenerateText(GROQ_KEY, prompt, { temperature: 0.15, maxOutputTokens: 4096 })
+    const parsed = safeParseJsonFromModel(text)
+    if (!parsed.ok) {
+      return res.status(422).json({
+        error: `No se pudo interpretar la respuesta de la IA: ${parsed.error}`,
+        raw: parsed.raw,
+      })
+    }
+    const o = parsed.value
+    const total = Number(o?.total)
+    const entidad = String(o?.entidad || '').trim().slice(0, 120) || 'Comercio'
+    const items = Array.isArray(o?.items) ? o.items.map((x) => String(x).trim()).filter(Boolean) : []
+    const fechaTicket =
+      o?.fecha === null || o?.fecha === undefined || o?.fecha === ''
+        ? null
+        : parseTicketFechaBody(typeof o.fecha === 'string' ? o.fecha : String(o.fecha))
+
+    if (!Number.isFinite(total) || total <= 0) {
+      return res.status(422).json({
+        error: 'No se obtuvo un importe total válido en el JSON. Revisa el ticket o inténtalo de nuevo.',
+        preview: text.slice(0, 600),
+      })
+    }
+
+    const fechaMov = fechaTicket || new Date().toISOString().slice(0, 10)
+    const descBase = `Ticket ${entidad}`
+    const descripcion = `${descBase}${items.length ? ` — ${items.slice(0, 4).join(', ')}` : ''}`.slice(0, 500)
+
+    await withTransaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO movimientos_financieros (usuario_id, tipo, monto, categoria, descripcion, fecha, hucha_id)
+         VALUES (?, 'gasto', ?, ?, ?, ?, NULL)`,
+        [userId, total, cat, descripcion, fechaMov]
+      )
+      for (const it of items.slice(0, 200)) {
+        await tx.run(`INSERT INTO despensa (usuario_id, item, origen) VALUES (?, ?, ?)`, [
+          userId,
+          it.slice(0, 200),
+          'ticket_ia',
+        ])
+      }
+    })
+
+    res.json({
+      ok: true,
+      model,
+      registrado: {
+        total,
+        entidad,
+        fecha: fechaMov,
+        categoria: cat,
+        itemsGuardados: Math.min(items.length, 200),
+      },
+    })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: err.message || 'Error al procesar el ticket' })
+  }
+})
+
+// ============================================
+// Iniciar servidor (primer puerto libre desde PREFERRED_PORT; Vite lee .dev-api-port)
+// ============================================
+function writeDevApiPortFile(port) {
+  try {
+    writeFileSync(DEV_API_PORT_FILE, `${port}\n`, 'utf8')
+  } catch (e) {
+    console.warn('No se pudo escribir .dev-api-port:', e?.message || e)
+  }
+}
+
+function clearDevApiPortFile() {
+  try {
+    unlinkSync(DEV_API_PORT_FILE)
+  } catch {
+    /* no existe */
+  }
+}
+
+const PORT_MAX = PREFERRED_PORT + 30
+/** @type {import('node:http').Server | null} */
+let activeHttpServer = null
+
+function startHttp(port) {
+  const srv = http.createServer(app)
+  srv.once('error', (err) => {
+    if (err?.code === 'EADDRINUSE' && port < PORT_MAX) {
+      console.warn(`[MyBrAIn] Puerto ${port} en uso; probando ${port + 1}…`)
+      srv.close(() => startHttp(port + 1))
+      return
+    }
+    console.error(err)
+    process.exit(1)
+  })
+  srv.listen(port, () => {
+    activeHttpServer = srv
+    writeDevApiPortFile(port)
+    if (port !== PREFERRED_PORT) {
+      console.warn(
+        `\n⚠️  El puerto ${PREFERRED_PORT} estaba ocupado: API en http://127.0.0.1:${port}\n` +
+          '   Vite reenvía /api leyendo backend/server/.dev-api-port.\n'
+      )
+    }
+    console.log(`🧠 MyBrAIn Server corriendo en http://127.0.0.1:${port}`)
+    if (GROQ_KEY) {
+      console.log('🤖 IA: Groq configurada (menú, informes, chat, lista inteligente, insights, tickets)')
+    } else {
+      console.log('💡 IA: añade GROQ_API_KEY en server/.env — https://console.groq.com/')
+    }
+  })
+}
+
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    clearDevApiPortFile()
+    if (activeHttpServer) {
+      activeHttpServer.close(() => process.exit(0))
+    } else {
+      process.exit(0)
+    }
+  })
+}
+
+startHttp(PREFERRED_PORT)
